@@ -44,11 +44,13 @@ func (m *Manager[C]) LoadPlugin(ctx context.Context, pm PluginMetaData) (loadedP
 
 	rpcClient, err := client.Client()
 	if err != nil {
+		log.Println(err)
 		return loadedPlugin[C]{}, err
 	}
 
 	raw, err := rpcClient.Dispense("ussd")
 	if err != nil {
+		log.Println(err)
 		return loadedPlugin[C]{}, err
 	}
 
@@ -99,11 +101,15 @@ func (m *Manager[C]) HealthMonitor(ctx context.Context) {
 		case pm := <-m.supervisorChan:
 			log.Printf("restarting plugin %s\n", pm.PluginKey)
 			if p, ok := m.Get(pm.PluginKey); ok && p.Cleanup != nil {
+				log.Println("cleaning up...")
 				p.Cleanup()
 			}
+			log.Println("deleting..")
 			m.Del(pm.PluginKey)
+			log.Println("loading...")
 			p, err := m.LoadPlugin(ctx, pm)
 			if err != nil {
+				log.Println("inserting...")
 				m.Insert(pm.PluginKey, p)
 			}
 		case <-ctx.Done():
