@@ -117,7 +117,10 @@ func (m *Manager[C]) HealthMonitor(ctx context.Context) {
 				continue
 			}
 			log.Println("inserting...")
-			m.Insert(pm.PluginKey, p)
+			err = m.Insert(pm.PluginKey, p)
+			if err != nil {
+				log.Println("failed to insert", err)
+			}
 
 		case <-ctx.Done():
 			return
