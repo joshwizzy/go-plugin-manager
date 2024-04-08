@@ -17,8 +17,8 @@ func NewManager[C any]() *Manager[C] {
 }
 
 type PluginMetaData struct {
-	binPath   string
-	pluginKey string
+	BinPath   string
+	PluginKey string
 }
 
 func (m *Manager[C]) LoadPlugins(pluginMap map[string]goplugin.Plugin, plugins []PluginMetaData) error {
@@ -26,7 +26,7 @@ func (m *Manager[C]) LoadPlugins(pluginMap map[string]goplugin.Plugin, plugins [
 		client := goplugin.NewClient(&goplugin.ClientConfig{
 			HandshakeConfig: Handshake,
 			Plugins:         pluginMap,
-			Cmd:             exec.Command(meta.binPath),
+			Cmd:             exec.Command(meta.BinPath),
 		})
 
 		m.pluginClients = append(m.pluginClients, client)
@@ -46,7 +46,7 @@ func (m *Manager[C]) LoadPlugins(pluginMap map[string]goplugin.Plugin, plugins [
 			return fmt.Errorf("plugin does not implement interface")
 		}
 
-		m.handlers[meta.pluginKey] = impl
+		m.handlers[meta.PluginKey] = impl
 	}
 	return nil
 }
