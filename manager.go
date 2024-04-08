@@ -16,12 +16,12 @@ func NewManager[C any]() *Manager[C] {
 	return &Manager[C]{handlers: make(map[string]C)}
 }
 
-type pluginMetaData struct {
+type PluginMetaData struct {
 	binPath   string
 	pluginKey string
 }
 
-func (m *Manager[C]) LoadPlugins(pluginMap map[string]goplugin.Plugin, plugins []pluginMetaData) error {
+func (m *Manager[C]) LoadPlugins(pluginMap map[string]goplugin.Plugin, plugins []PluginMetaData) error {
 	for _, meta := range plugins {
 		client := goplugin.NewClient(&goplugin.ClientConfig{
 			HandshakeConfig: Handshake,
