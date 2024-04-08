@@ -1,4 +1,4 @@
-module github.com/joshwizzy/plugin-manager
+module github.com/joshwizzy/go-plugin-manager
 
 go 1.22.0
 
