@@ -58,7 +58,7 @@ func (m *Manager[C]) LoadPlugin(ctx context.Context, pm PluginMetaData) (loadedP
 	if !ok {
 		return loadedPlugin[C]{}, fmt.Errorf("plugin does not implement interface")
 	}
-	go watchPlugin(ctx, pm, rpcClient, m.supervisorChan)
+	watchPlugin(ctx, pm, rpcClient, m.supervisorChan)
 	return loadedPlugin[C]{impl, client.Kill}, nil
 }
 
