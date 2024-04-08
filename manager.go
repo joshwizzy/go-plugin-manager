@@ -105,13 +105,20 @@ func (m *Manager[C]) HealthMonitor(ctx context.Context) {
 				p.Cleanup()
 			}
 			log.Println("deleting..")
-			m.Del(pm.PluginKey)
-			log.Println("loading...")
+			err := m.Del(pm.PluginKey)
+			if err != nil {
+				log.Println("failed to delete", err)
+				continue
+			}
+			log.Printf("loading %v %v...", pm.PluginKey, pm.BinPath)
 			p, err := m.LoadPlugin(ctx, pm)
 			if err != nil {
-				log.Println("inserting...")
-				m.Insert(pm.PluginKey, p)
+				log.Println("failed to load", err)
+				continue
 			}
+			log.Println("inserting...")
+			m.Insert(pm.PluginKey, p)
+
 		case <-ctx.Done():
 			return
 		}
