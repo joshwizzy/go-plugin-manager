@@ -1,4 +1,4 @@
-package sdk
+package manager
 
 import goplugin "github.com/hashicorp/go-plugin"
 
