@@ -16,15 +16,25 @@ type loadedPlugin[T any] struct {
 	Cleanup func()
 }
 
+type ManagerConfig struct {
+	RestartConfig RestartConfig
+}
+type RestartConfig struct {
+	Managed         bool
+	RestartNotifyCh chan PluginMetaData
+}
+
 type Manager[C any] struct {
 	sync.RWMutex
+	config         *ManagerConfig
 	plugins        map[string]loadedPlugin[C]
 	supervisorChan chan PluginMetaData
 	pluginMap      map[string]goplugin.Plugin
 }
 
-func NewManager[C any]() *Manager[C] {
+func NewManager[C any](config *ManagerConfig) *Manager[C] {
 	return &Manager[C]{
+		config:         config,
 		plugins:        make(map[string]loadedPlugin[C]),
 		supervisorChan: make(chan PluginMetaData),
 	}
@@ -58,7 +68,11 @@ func (m *Manager[C]) LoadPlugin(ctx context.Context, pm PluginMetaData) (loadedP
 	if !ok {
 		return loadedPlugin[C]{}, fmt.Errorf("plugin does not implement interface")
 	}
-	watchPlugin(ctx, pm, rpcClient, m.supervisorChan)
+	supervisorChan := m.supervisorChan
+	if !m.config.RestartConfig.Managed && m.config.RestartConfig.RestartNotifyCh != nil {
+		supervisorChan = m.config.RestartConfig.RestartNotifyCh
+	}
+	watchPlugin(ctx, pm, rpcClient, supervisorChan)
 	return loadedPlugin[C]{impl, client.Kill}, nil
 }
 
@@ -71,7 +85,13 @@ func watchPlugin(ctx context.Context, pm PluginMetaData, rpcClient goplugin.Clie
 			case <-ticker.C:
 				if err := rpcClient.Ping(); err != nil {
 					log.Printf("plugin %s exited will restart\n", pm.PluginKey)
-					supervisorChan <- pm
+					// Non-blocking send or discard
+					select {
+					case supervisorChan <- pm:
+						// message sent
+					default:
+						// message dropped
+					}
 					return
 				}
 			case <-ctx.Done():
