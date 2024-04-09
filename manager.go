@@ -17,22 +17,34 @@ type loadedPlugin[T any] struct {
 }
 
 type ManagerConfig struct {
-	RestartConfig RestartConfig
+	HandshakeConfig goplugin.HandshakeConfig
+	PluginMap       goplugin.PluginSet
+	RestartConfig   RestartConfig
 }
 type RestartConfig struct {
 	Managed         bool
 	RestartNotifyCh chan PluginMetaData
+	PingInterval    time.Duration
+	MaxRestarts     int
 }
 
 type Manager[C any] struct {
 	sync.RWMutex
-	config         *ManagerConfig
-	plugins        map[string]loadedPlugin[C]
-	supervisorChan chan PluginMetaData
-	pluginMap      map[string]goplugin.Plugin
+	config          *ManagerConfig
+	plugins         map[string]loadedPlugin[C]
+	supervisorChan  chan PluginMetaData
+	pluginMap       map[string]goplugin.Plugin
+	handshakeConfig goplugin.HandshakeConfig
 }
 
 func NewManager[C any](config *ManagerConfig) *Manager[C] {
+	if config.RestartConfig.MaxRestarts == 0 {
+		config.RestartConfig.MaxRestarts = 5
+	}
+	if config.RestartConfig.PingInterval == 0 {
+		config.RestartConfig.PingInterval = 10 * time.Second
+	}
+
 	return &Manager[C]{
 		config:         config,
 		plugins:        make(map[string]loadedPlugin[C]),
@@ -47,8 +59,8 @@ type PluginMetaData struct {
 
 func (m *Manager[C]) LoadPlugin(ctx context.Context, pm PluginMetaData) (loadedPlugin[C], error) {
 	client := goplugin.NewClient(&goplugin.ClientConfig{
-		HandshakeConfig: Handshake,
-		Plugins:         m.pluginMap,
+		HandshakeConfig: m.config.HandshakeConfig,
+		Plugins:         m.config.PluginMap,
 		Cmd:             exec.Command(pm.BinPath),
 	})
 
@@ -72,12 +84,11 @@ func (m *Manager[C]) LoadPlugin(ctx context.Context, pm PluginMetaData) (loadedP
 	if !m.config.RestartConfig.Managed && m.config.RestartConfig.RestartNotifyCh != nil {
 		supervisorChan = m.config.RestartConfig.RestartNotifyCh
 	}
-	watchPlugin(ctx, pm, rpcClient, supervisorChan)
+	watchPlugin(ctx, pm, rpcClient, supervisorChan, m.config.RestartConfig.PingInterval)
 	return loadedPlugin[C]{impl, client.Kill}, nil
 }
 
-func watchPlugin(ctx context.Context, pm PluginMetaData, rpcClient goplugin.ClientProtocol, supervisorChan chan PluginMetaData) {
-	interval := 10 * time.Second
+func watchPlugin(ctx context.Context, pm PluginMetaData, rpcClient goplugin.ClientProtocol, supervisorChan chan PluginMetaData, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	go func() {
 		for {
@@ -101,8 +112,7 @@ func watchPlugin(ctx context.Context, pm PluginMetaData, rpcClient goplugin.Clie
 	}()
 }
 
-func (m *Manager[C]) LoadPlugins(ctx context.Context, pluginMap map[string]goplugin.Plugin, plugins []PluginMetaData) error {
-	m.pluginMap = pluginMap
+func (m *Manager[C]) LoadPlugins(ctx context.Context, plugins []PluginMetaData) error {
 	for _, pm := range plugins {
 		p, err := m.LoadPlugin(ctx, pm)
 		if err != nil {
@@ -112,7 +122,6 @@ func (m *Manager[C]) LoadPlugins(ctx context.Context, pluginMap map[string]goplu
 	}
 	go m.HealthMonitor(ctx)
 	return nil
-
 }
 
 func (m *Manager[C]) RestartPlugin(ctx context.Context, pm PluginMetaData) {
