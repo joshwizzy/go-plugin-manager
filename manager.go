@@ -115,32 +115,36 @@ func (m *Manager[C]) LoadPlugins(ctx context.Context, pluginMap map[string]goplu
 
 }
 
+func (m *Manager[C]) RestartPlugin(ctx context.Context, pm PluginMetaData) {
+	log.Printf("restarting plugin %s\n", pm.PluginKey)
+	if p, ok := m.Get(pm.PluginKey); ok && p.Cleanup != nil {
+		log.Println("cleaning up...")
+		p.Cleanup()
+	}
+	log.Println("deleting..")
+	err := m.Del(pm.PluginKey)
+	if err != nil {
+		log.Println("failed to delete", err)
+		return
+	}
+	log.Printf("loading %v %v...", pm.PluginKey, pm.BinPath)
+	p, err := m.LoadPlugin(ctx, pm)
+	if err != nil {
+		log.Println("failed to load", err)
+		return
+	}
+	log.Println("inserting...")
+	err = m.Insert(pm.PluginKey, p)
+	if err != nil {
+		log.Println("failed to insert", err)
+	}
+}
+
 func (m *Manager[C]) HealthMonitor(ctx context.Context) {
 	for {
 		select {
 		case pm := <-m.supervisorChan:
-			log.Printf("restarting plugin %s\n", pm.PluginKey)
-			if p, ok := m.Get(pm.PluginKey); ok && p.Cleanup != nil {
-				log.Println("cleaning up...")
-				p.Cleanup()
-			}
-			log.Println("deleting..")
-			err := m.Del(pm.PluginKey)
-			if err != nil {
-				log.Println("failed to delete", err)
-				continue
-			}
-			log.Printf("loading %v %v...", pm.PluginKey, pm.BinPath)
-			p, err := m.LoadPlugin(ctx, pm)
-			if err != nil {
-				log.Println("failed to load", err)
-				continue
-			}
-			log.Println("inserting...")
-			err = m.Insert(pm.PluginKey, p)
-			if err != nil {
-				log.Println("failed to insert", err)
-			}
+			m.RestartPlugin(ctx, pm)
 
 		case <-ctx.Done():
 			return
