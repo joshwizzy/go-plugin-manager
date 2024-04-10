@@ -23,7 +23,7 @@ type ManagerConfig struct {
 }
 type RestartConfig struct {
 	Managed         bool
-	RestartNotifyCh chan PluginMetaData
+	RestartNotifyCh chan PluginInfo
 	PingInterval    time.Duration
 	MaxRestarts     int
 }
@@ -32,7 +32,7 @@ type Manager[C any] struct {
 	sync.RWMutex
 	config         *ManagerConfig
 	plugins        map[string]loadedPlugin[C]
-	supervisorChan chan PluginMetaData
+	supervisorChan chan PluginInfo
 }
 
 func NewManager[C any](config *ManagerConfig) *Manager[C] {
@@ -46,11 +46,11 @@ func NewManager[C any](config *ManagerConfig) *Manager[C] {
 	return &Manager[C]{
 		config:         config,
 		plugins:        make(map[string]loadedPlugin[C]),
-		supervisorChan: make(chan PluginMetaData),
+		supervisorChan: make(chan PluginInfo),
 	}
 }
 
-type PluginMetaData struct {
+type PluginInfo struct {
 	BinPath   string
 	PluginKey string
 }
@@ -63,7 +63,7 @@ func pluginKeys(ps goplugin.PluginSet) []string {
 	return keys
 }
 
-func (m *Manager[C]) LoadPlugin(ctx context.Context, pm PluginMetaData) (loadedPlugin[C], error) {
+func (m *Manager[C]) loadPlugin(ctx context.Context, pm PluginInfo) (loadedPlugin[C], error) {
 	client := goplugin.NewClient(&goplugin.ClientConfig{
 		HandshakeConfig: m.config.HandshakeConfig,
 		Plugins:         m.config.PluginMap,
@@ -95,7 +95,7 @@ func (m *Manager[C]) LoadPlugin(ctx context.Context, pm PluginMetaData) (loadedP
 	return loadedPlugin[C]{impl, client.Kill}, nil
 }
 
-func watchPlugin(ctx context.Context, pm PluginMetaData, rpcClient goplugin.ClientProtocol, supervisorChan chan PluginMetaData, interval time.Duration) {
+func watchPlugin(ctx context.Context, pm PluginInfo, rpcClient goplugin.ClientProtocol, supervisorChan chan PluginInfo, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	go func() {
 		for {
@@ -119,9 +119,9 @@ func watchPlugin(ctx context.Context, pm PluginMetaData, rpcClient goplugin.Clie
 	}()
 }
 
-func (m *Manager[C]) LoadPlugins(ctx context.Context, plugins []PluginMetaData) error {
+func (m *Manager[C]) LoadPlugins(ctx context.Context, plugins []PluginInfo) error {
 	for _, pm := range plugins {
-		p, err := m.LoadPlugin(ctx, pm)
+		p, err := m.loadPlugin(ctx, pm)
 		if err != nil {
 			return err
 		}
@@ -131,26 +131,26 @@ func (m *Manager[C]) LoadPlugins(ctx context.Context, plugins []PluginMetaData) 
 	return nil
 }
 
-func (m *Manager[C]) RestartPlugin(ctx context.Context, pm PluginMetaData) {
+func (m *Manager[C]) RestartPlugin(ctx context.Context, pm PluginInfo) {
 	log.Printf("restarting plugin %s\n", pm.PluginKey)
-	if p, ok := m.Get(pm.PluginKey); ok && p.Cleanup != nil {
+	if p, ok := m.GetPlugin(pm.PluginKey); ok && p.Cleanup != nil {
 		log.Println("cleaning up...")
 		p.Cleanup()
 	}
 	log.Println("deleting..")
-	err := m.Del(pm.PluginKey)
+	err := m.DeletePlugin(pm.PluginKey)
 	if err != nil {
 		log.Println("failed to delete", err)
 		return
 	}
 	log.Printf("loading %v %v...", pm.PluginKey, pm.BinPath)
-	p, err := m.LoadPlugin(ctx, pm)
+	p, err := m.loadPlugin(ctx, pm)
 	if err != nil {
 		log.Println("failed to load", err)
 		return
 	}
 	log.Println("inserting...")
-	err = m.Insert(pm.PluginKey, p)
+	err = m.InsertPlugin(pm.PluginKey, p)
 	if err != nil {
 		log.Println("failed to insert", err)
 	}
@@ -175,21 +175,21 @@ func (m *Manager[C]) Close() {
 	}
 }
 
-func (m *Manager[C]) Get(pluginKey string) (loadedPlugin[C], bool) {
+func (m *Manager[C]) GetPlugin(pluginKey string) (loadedPlugin[C], bool) {
 	m.Lock()
 	defer m.Unlock()
 	p, ok := m.plugins[pluginKey]
 	return p, ok
 }
 
-func (m *Manager[C]) Insert(pluginKey string, p loadedPlugin[C]) error {
+func (m *Manager[C]) InsertPlugin(pluginKey string, p loadedPlugin[C]) error {
 	m.Lock()
 	defer m.Unlock()
 	m.plugins[pluginKey] = p
 	return nil
 }
 
-func (m *Manager[C]) Del(pluginKey string) error {
+func (m *Manager[C]) DeletePlugin(pluginKey string) error {
 	m.Lock()
 	defer m.Unlock()
 	p, ok := m.plugins[pluginKey]
