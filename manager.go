@@ -12,7 +12,7 @@ import (
 )
 
 type loadedPlugin[T any] struct {
-	Client  T
+	Impl    T
 	Cleanup func()
 }
 
@@ -30,11 +30,9 @@ type RestartConfig struct {
 
 type Manager[C any] struct {
 	sync.RWMutex
-	config          *ManagerConfig
-	plugins         map[string]loadedPlugin[C]
-	supervisorChan  chan PluginMetaData
-	pluginMap       map[string]goplugin.Plugin
-	handshakeConfig goplugin.HandshakeConfig
+	config         *ManagerConfig
+	plugins        map[string]loadedPlugin[C]
+	supervisorChan chan PluginMetaData
 }
 
 func NewManager[C any](config *ManagerConfig) *Manager[C] {
@@ -57,6 +55,14 @@ type PluginMetaData struct {
 	PluginKey string
 }
 
+func pluginKeys(ps goplugin.PluginSet) []string {
+	keys := []string{}
+	for key, _ := range ps {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
 func (m *Manager[C]) LoadPlugin(ctx context.Context, pm PluginMetaData) (loadedPlugin[C], error) {
 	client := goplugin.NewClient(&goplugin.ClientConfig{
 		HandshakeConfig: m.config.HandshakeConfig,
@@ -70,7 +76,8 @@ func (m *Manager[C]) LoadPlugin(ctx context.Context, pm PluginMetaData) (loadedP
 		return loadedPlugin[C]{}, err
 	}
 
-	raw, err := rpcClient.Dispense("ussd")
+	name := pluginKeys(m.config.PluginMap)[0]
+	raw, err := rpcClient.Dispense(name)
 	if err != nil {
 		log.Println(err)
 		return loadedPlugin[C]{}, err
