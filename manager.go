@@ -127,7 +127,7 @@ func (m *Manager[C]) LoadPlugins(ctx context.Context, plugins []PluginMetaData) 
 		}
 		m.plugins[pm.PluginKey] = p
 	}
-	go m.HealthMonitor(ctx)
+	go m.monitorPlugins(ctx)
 	return nil
 }
 
@@ -156,7 +156,7 @@ func (m *Manager[C]) RestartPlugin(ctx context.Context, pm PluginMetaData) {
 	}
 }
 
-func (m *Manager[C]) HealthMonitor(ctx context.Context) {
+func (m *Manager[C]) monitorPlugins(ctx context.Context) {
 	for {
 		select {
 		case pm := <-m.supervisorChan:
