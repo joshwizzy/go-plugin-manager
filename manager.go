@@ -12,8 +12,9 @@ import (
 )
 
 type loadedPlugin[T any] struct {
-	Impl    T
-	Cleanup func()
+	Impl         T
+	Cleanup      func()
+	RestartCount int
 }
 
 type ManagerConfig struct {
@@ -92,7 +93,11 @@ func (m *Manager[C]) loadPlugin(ctx context.Context, pm PluginInfo) (loadedPlugi
 		supervisorChan = m.config.RestartConfig.RestartNotifyCh
 	}
 	watchPlugin(ctx, pm, rpcClient, supervisorChan, m.config.RestartConfig.PingInterval)
-	return loadedPlugin[C]{impl, client.Kill}, nil
+	return loadedPlugin[C]{
+		Impl:         impl,
+		Cleanup:      client.Kill,
+		RestartCount: 0,
+	}, nil
 }
 
 func watchPlugin(ctx context.Context, pm PluginInfo, rpcClient goplugin.ClientProtocol, supervisorChan chan PluginInfo, interval time.Duration) {
@@ -133,9 +138,17 @@ func (m *Manager[C]) LoadPlugins(ctx context.Context, plugins []PluginInfo) erro
 
 func (m *Manager[C]) RestartPlugin(ctx context.Context, pm PluginInfo) {
 	log.Printf("restarting plugin %s\n", pm.PluginKey)
-	if p, ok := m.GetPlugin(pm.PluginKey); ok && p.Cleanup != nil {
+	restartCount := 0
+	if p, ok := m.GetPlugin(pm.PluginKey); ok {
+		restartCount = p.RestartCount
+		if restartCount >= m.config.RestartConfig.MaxRestarts {
+			print("max restarts exceeded: %v", m.config.RestartConfig.MaxRestarts)
+			return
+		}
 		log.Println("cleaning up...")
-		p.Cleanup()
+		if p.Cleanup != nil {
+			p.Cleanup()
+		}
 	}
 	log.Println("deleting..")
 	err := m.DeletePlugin(pm.PluginKey)
@@ -149,6 +162,7 @@ func (m *Manager[C]) RestartPlugin(ctx context.Context, pm PluginInfo) {
 		log.Println("failed to load", err)
 		return
 	}
+	p.RestartCount = restartCount + 1
 	log.Println("inserting...")
 	err = m.InsertPlugin(pm.PluginKey, p)
 	if err != nil {
