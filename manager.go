@@ -1,7 +1,6 @@
 package manager
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"os"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/hashicorp/go-hclog"
 	goplugin "github.com/hashicorp/go-plugin"
+	"gopkg.in/tomb.v2"
 )
 
 type PluginInstance[T any] struct {
@@ -37,6 +37,7 @@ type Manager[C any] struct {
 	config         *ManagerConfig
 	plugins        map[string]PluginInstance[C]
 	supervisorChan chan PluginInfo
+	t              tomb.Tomb
 }
 
 func NewManager[C any](config *ManagerConfig) *Manager[C] {
@@ -74,7 +75,7 @@ func pluginKeys(ps goplugin.PluginSet) []string {
 	return keys
 }
 
-func (m *Manager[C]) loadPlugin(ctx context.Context, pm PluginInfo) (PluginInstance[C], error) {
+func (m *Manager[C]) loadPlugin(pm PluginInfo) (PluginInstance[C], error) {
 	client := goplugin.NewClient(&goplugin.ClientConfig{
 		HandshakeConfig: m.config.HandshakeConfig,
 		Plugins:         m.config.PluginMap,
@@ -102,22 +103,24 @@ func (m *Manager[C]) loadPlugin(ctx context.Context, pm PluginInfo) (PluginInsta
 	if !m.config.RestartConfig.Managed && m.config.RestartConfig.RestartNotifyCh != nil {
 		supervisorChan = m.config.RestartConfig.RestartNotifyCh
 	}
-	watchPlugin(ctx, pm, rpcClient, supervisorChan, m.config.RestartConfig.PingInterval)
-	return PluginInstance[C]{
+	watch := m.watchPlugin(m.config.RestartConfig.PingInterval, rpcClient, pm, supervisorChan)
+	m.t.Go(watch)
+	p := PluginInstance[C]{
 		Impl:         impl,
 		Cleanup:      client.Kill,
 		RestartCount: 0,
-	}, nil
+	}
+	return p, nil
 }
 
-func watchPlugin(ctx context.Context, logger hclog.Logger, pm PluginInfo, rpcClient goplugin.ClientProtocol, supervisorChan chan PluginInfo, interval time.Duration) {
+func (m *Manager[C]) watchPlugin(interval time.Duration, rpcClient goplugin.ClientProtocol, pm PluginInfo, supervisorChan chan PluginInfo) func() error {
 	ticker := time.NewTicker(interval)
-	go func() {
+	f := func() error {
 		for {
 			select {
 			case <-ticker.C:
 				if err := rpcClient.Ping(); err != nil {
-					logger.Debug("plugin %s exited will restart\n", pm.PluginKey)
+					m.config.Logger.Debug("plugin %s exited will restart\n", pm.PluginKey)
 					// Non-blocking send or discard
 					select {
 					case supervisorChan <- pm:
@@ -125,28 +128,29 @@ func watchPlugin(ctx context.Context, logger hclog.Logger, pm PluginInfo, rpcCli
 					default:
 						// message dropped
 					}
-					return
+					return err
 				}
-			case <-ctx.Done():
-				return
+			case <-m.t.Dying():
+				return nil
 			}
 		}
-	}()
+	}
+	return f
 }
 
-func (m *Manager[C]) LoadPlugins(ctx context.Context, plugins []PluginInfo) error {
+func (m *Manager[C]) LoadPlugins(plugins []PluginInfo) error {
 	for _, pm := range plugins {
-		p, err := m.loadPlugin(ctx, pm)
+		p, err := m.loadPlugin(pm)
 		if err != nil {
 			return err
 		}
 		m.plugins[pm.PluginKey] = p
 	}
-	go m.monitorPlugins(ctx)
+	m.t.Go(m.monitorPlugins)
 	return nil
 }
 
-func (m *Manager[C]) RestartPlugin(ctx context.Context, pm PluginInfo) {
+func (m *Manager[C]) RestartPlugin(pm PluginInfo) {
 	m.config.Logger.Debug("restarting plugin %s\n", pm.PluginKey)
 	restartCount := 0
 	if p, ok := m.GetPlugin(pm.PluginKey); ok {
@@ -160,20 +164,20 @@ func (m *Manager[C]) RestartPlugin(ctx context.Context, pm PluginInfo) {
 		}
 	}
 
-	err := m.DeletePlugin(pm.PluginKey)
+	err := m.deletePlugin(pm.PluginKey)
 	if err != nil {
 		m.config.Logger.Error("failed to delete plugin: %v", err)
 		return
 	}
 	log.Printf("loading %v %v...", pm.PluginKey, pm.BinPath)
-	p, err := m.loadPlugin(ctx, pm)
+	p, err := m.loadPlugin(pm)
 	if err != nil {
 		m.config.Logger.Error("failed to load plugin: %v", err)
 		return
 	}
 	p.RestartCount = restartCount + 1
 
-	err = m.InsertPlugin(pm.PluginKey, p)
+	err = m.insertPlugin(pm.PluginKey, p)
 	if err != nil {
 		m.config.Logger.Error("failed to insert", err)
 	}
@@ -181,23 +185,25 @@ func (m *Manager[C]) RestartPlugin(ctx context.Context, pm PluginInfo) {
 	m.config.Logger.Debug("restarted plugin: %v", pm)
 }
 
-func (m *Manager[C]) monitorPlugins(ctx context.Context) {
+func (m *Manager[C]) monitorPlugins() error {
 	for {
 		select {
 		case pm := <-m.supervisorChan:
-			m.RestartPlugin(ctx, pm)
+			m.RestartPlugin(pm)
 
-		case <-ctx.Done():
-			return
+		case <-m.t.Dying():
+			return nil
 		}
 	}
 }
 
-func (m *Manager[C]) Close() {
+func (m *Manager[C]) Close() error {
 
 	for _, client := range m.plugins {
 		client.Cleanup()
 	}
+	m.t.Kill(nil)
+	return m.t.Wait()
 }
 
 func (m *Manager[C]) GetPlugin(pluginKey string) (PluginInstance[C], bool) {
@@ -207,14 +213,14 @@ func (m *Manager[C]) GetPlugin(pluginKey string) (PluginInstance[C], bool) {
 	return p, ok
 }
 
-func (m *Manager[C]) InsertPlugin(pluginKey string, p PluginInstance[C]) error {
+func (m *Manager[C]) insertPlugin(pluginKey string, p PluginInstance[C]) error {
 	m.Lock()
 	defer m.Unlock()
 	m.plugins[pluginKey] = p
 	return nil
 }
 
-func (m *Manager[C]) DeletePlugin(pluginKey string) error {
+func (m *Manager[C]) deletePlugin(pluginKey string) error {
 	m.Lock()
 	defer m.Unlock()
 	p, ok := m.plugins[pluginKey]
