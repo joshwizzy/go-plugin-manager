@@ -19,6 +19,11 @@ type PluginInstance[T any] struct {
 	RestartCount int
 }
 
+type PluginInfo struct {
+	BinPath   string
+	PluginKey string
+}
+
 type ManagerConfig struct {
 	HandshakeConfig goplugin.HandshakeConfig
 	PluginMap       goplugin.PluginSet
@@ -26,19 +31,18 @@ type ManagerConfig struct {
 	Logger          hclog.Logger
 }
 type RestartConfig struct {
-	Managed         bool
-	RestartNotifyCh chan PluginInfo
-	PingInterval    time.Duration
-	MaxRestarts     int
+	Managed      bool
+	PingInterval time.Duration
+	MaxRestarts  int
 }
 
 type Manager[C any] struct {
 	sync.RWMutex
-	Name           string
-	config         *ManagerConfig
-	plugins        map[string]PluginInstance[C]
-	supervisorChan chan PluginInfo
-	t              tomb.Tomb
+	Name    string
+	c       chan PluginInfo
+	config  *ManagerConfig
+	plugins map[string]PluginInstance[C]
+	t       tomb.Tomb
 }
 
 func NewManager[C any](config *ManagerConfig) *Manager[C] {
@@ -56,13 +60,22 @@ func NewManager[C any](config *ManagerConfig) *Manager[C] {
 		})
 	}
 
-	return &Manager[C]{
-		Name:           pluginKey(config.PluginMap),
-		config:         config,
-		plugins:        make(map[string]PluginInstance[C]),
-		supervisorChan: make(chan PluginInfo),
+	c := make(chan PluginInfo)
+	m := &Manager[C]{
+		Name:    pluginKey(config.PluginMap),
+		config:  config,
+		plugins: make(map[string]PluginInstance[C]),
 	}
+	if config.RestartConfig.Managed {
+		m.t.Go(m.startPluginWatcher(c))
+
+	} else {
+		m.c = c
+	}
+
+	return m
 }
+
 func pluginKey(ps goplugin.PluginSet) (key string) {
 	for k := range ps {
 		key = k
@@ -71,9 +84,11 @@ func pluginKey(ps goplugin.PluginSet) (key string) {
 	return
 }
 
-type PluginInfo struct {
-	BinPath   string
-	PluginKey string
+func (m *Manager[C]) Ch() <-chan PluginInfo {
+	if m.config.RestartConfig.Managed {
+		panic("plugin manager is managed")
+	}
+	return m.c
 }
 
 func (m *Manager[C]) loadPlugin(pm PluginInfo) (PluginInstance[C], error) {
@@ -99,11 +114,8 @@ func (m *Manager[C]) loadPlugin(pm PluginInfo) (PluginInstance[C], error) {
 	if !ok {
 		return PluginInstance[C]{}, fmt.Errorf("plugin does not implement interface")
 	}
-	supervisorChan := m.supervisorChan
-	if !m.config.RestartConfig.Managed && m.config.RestartConfig.RestartNotifyCh != nil {
-		supervisorChan = m.config.RestartConfig.RestartNotifyCh
-	}
-	watcher := m.pluginWatcher(m.config.RestartConfig.PingInterval, rpcClient, pm, supervisorChan)
+
+	watcher := m.pluginWatcher(m.config.RestartConfig.PingInterval, rpcClient, pm)
 	m.t.Go(watcher)
 	p := PluginInstance[C]{
 		Impl:         impl,
@@ -117,7 +129,6 @@ func (m *Manager[C]) pluginWatcher(
 	interval time.Duration,
 	rpcClient goplugin.ClientProtocol,
 	pm PluginInfo,
-	supervisorChan chan PluginInfo,
 ) func() error {
 	ticker := time.NewTicker(interval)
 	f := func() error {
@@ -128,7 +139,7 @@ func (m *Manager[C]) pluginWatcher(
 					m.config.Logger.Debug("plugin %s exited will restart\n", pm.PluginKey)
 					// Non-blocking send or discard
 					select {
-					case supervisorChan <- pm:
+					case m.c <- pm:
 						// message sent
 					default:
 						// message dropped
@@ -151,7 +162,7 @@ func (m *Manager[C]) LoadPlugins(plugins []PluginInfo) error {
 		}
 		m.plugins[pm.PluginKey] = p
 	}
-	m.t.Go(m.monitorPlugins)
+
 	return nil
 }
 
@@ -190,14 +201,16 @@ func (m *Manager[C]) RestartPlugin(pm PluginInfo) {
 	m.config.Logger.Debug("restarted plugin: %v", pm)
 }
 
-func (m *Manager[C]) monitorPlugins() error {
-	for {
-		select {
-		case pm := <-m.supervisorChan:
-			m.RestartPlugin(pm)
+func (m *Manager[C]) startPluginWatcher(c <-chan PluginInfo) func() error {
+	return func() error {
+		for {
+			select {
+			case pm := <-c:
+				m.RestartPlugin(pm)
 
-		case <-m.t.Dying():
-			return nil
+			case <-m.t.Dying():
+				return nil
+			}
 		}
 	}
 }
