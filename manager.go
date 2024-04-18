@@ -15,7 +15,7 @@ import (
 
 type PluginInstance[T any] struct {
 	Impl         T
-	Cleanup      func()
+	Kill         func()
 	RestartCount int
 }
 
@@ -34,6 +34,7 @@ type RestartConfig struct {
 
 type Manager[C any] struct {
 	sync.RWMutex
+	Name           string
 	config         *ManagerConfig
 	plugins        map[string]PluginInstance[C]
 	supervisorChan chan PluginInfo
@@ -56,23 +57,23 @@ func NewManager[C any](config *ManagerConfig) *Manager[C] {
 	}
 
 	return &Manager[C]{
+		Name:           pluginKey(config.PluginMap),
 		config:         config,
 		plugins:        make(map[string]PluginInstance[C]),
 		supervisorChan: make(chan PluginInfo),
 	}
 }
+func pluginKey(ps goplugin.PluginSet) (key string) {
+	for k := range ps {
+		key = k
+		break
+	}
+	return
+}
 
 type PluginInfo struct {
 	BinPath   string
 	PluginKey string
-}
-
-func pluginKeys(ps goplugin.PluginSet) []string {
-	keys := []string{}
-	for key, _ := range ps {
-		keys = append(keys, key)
-	}
-	return keys
 }
 
 func (m *Manager[C]) loadPlugin(pm PluginInfo) (PluginInstance[C], error) {
@@ -88,8 +89,7 @@ func (m *Manager[C]) loadPlugin(pm PluginInfo) (PluginInstance[C], error) {
 		return PluginInstance[C]{}, err
 	}
 
-	name := pluginKeys(m.config.PluginMap)[0]
-	raw, err := rpcClient.Dispense(name)
+	raw, err := rpcClient.Dispense(m.Name)
 	if err != nil {
 		m.config.Logger.Error(err.Error())
 		return PluginInstance[C]{}, err
@@ -103,17 +103,22 @@ func (m *Manager[C]) loadPlugin(pm PluginInfo) (PluginInstance[C], error) {
 	if !m.config.RestartConfig.Managed && m.config.RestartConfig.RestartNotifyCh != nil {
 		supervisorChan = m.config.RestartConfig.RestartNotifyCh
 	}
-	watch := m.watchPlugin(m.config.RestartConfig.PingInterval, rpcClient, pm, supervisorChan)
-	m.t.Go(watch)
+	watcher := m.pluginWatcher(m.config.RestartConfig.PingInterval, rpcClient, pm, supervisorChan)
+	m.t.Go(watcher)
 	p := PluginInstance[C]{
 		Impl:         impl,
-		Cleanup:      client.Kill,
+		Kill:         client.Kill,
 		RestartCount: 0,
 	}
 	return p, nil
 }
 
-func (m *Manager[C]) watchPlugin(interval time.Duration, rpcClient goplugin.ClientProtocol, pm PluginInfo, supervisorChan chan PluginInfo) func() error {
+func (m *Manager[C]) pluginWatcher(
+	interval time.Duration,
+	rpcClient goplugin.ClientProtocol,
+	pm PluginInfo,
+	supervisorChan chan PluginInfo,
+) func() error {
 	ticker := time.NewTicker(interval)
 	f := func() error {
 		for {
@@ -159,8 +164,8 @@ func (m *Manager[C]) RestartPlugin(pm PluginInfo) {
 			m.config.Logger.Debug("max restarts exceeded: %v\n", m.config.RestartConfig.MaxRestarts)
 			return
 		}
-		if p.Cleanup != nil {
-			p.Cleanup()
+		if p.Kill != nil {
+			p.Kill()
 		}
 	}
 
@@ -200,7 +205,7 @@ func (m *Manager[C]) monitorPlugins() error {
 func (m *Manager[C]) Close() error {
 
 	for _, client := range m.plugins {
-		client.Cleanup()
+		client.Kill()
 	}
 	m.t.Kill(nil)
 	return m.t.Wait()
@@ -229,8 +234,8 @@ func (m *Manager[C]) deletePlugin(pluginKey string) error {
 		m.config.Logger.Error(err.Error())
 		return err
 	}
-	if p.Cleanup != nil {
-		p.Cleanup()
+	if p.Kill != nil {
+		p.Kill()
 	}
 	return nil
 }
