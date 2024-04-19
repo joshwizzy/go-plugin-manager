@@ -205,10 +205,17 @@ func (m *Manager[C]) startPluginSupervisor(dying <-chan PluginInfo, dead chan<- 
 				if m.config.RestartConfig.Managed {
 					m.RestartPlugin(pm)
 				} else {
-					dead <- pm
+					// dead <- pm
+					select {
+					case dead <- pm:
+						// message sent
+					default:
+						// message dropped
+					}
 				}
 
 			case <-m.t.Dying():
+				log.Println("tomb is dying??")
 				return nil
 			}
 		}
