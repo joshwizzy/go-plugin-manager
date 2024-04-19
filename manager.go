@@ -214,8 +214,8 @@ func (m *Manager[C]) startPluginSupervisor(dying <-chan PluginInfo, dead chan<- 
 					}
 				}
 
-			case <-m.t.Dying():
-				log.Println("tomb is dying??")
+			case s := <-m.t.Dying():
+				log.Printf("tomb is dying?? %v\n", s)
 				return nil
 			}
 		}
