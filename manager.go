@@ -140,7 +140,7 @@ func (m *Manager[C]) pluginWatcher(
 					default:
 						// message dropped
 					}
-					return err
+					return nil
 				}
 			case <-m.t.Dying():
 				return nil
