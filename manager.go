@@ -39,7 +39,8 @@ type RestartConfig struct {
 type Manager[C any] struct {
 	sync.RWMutex
 	Name    string
-	c       chan PluginInfo
+	dying   chan<- PluginInfo
+	dead    <-chan PluginInfo
 	config  *ManagerConfig
 	plugins map[string]PluginInstance[C]
 	t       tomb.Tomb
@@ -60,20 +61,22 @@ func NewManager[C any](config *ManagerConfig) *Manager[C] {
 		})
 	}
 
-	c := make(chan PluginInfo)
+	dying, dead := make(chan PluginInfo), make(chan PluginInfo)
 	m := &Manager[C]{
 		Name:    pluginKey(config.PluginMap),
 		config:  config,
 		plugins: make(map[string]PluginInstance[C]),
+		dying:   dying,
+		dead:    dead,
 	}
-	if config.RestartConfig.Managed {
-		m.t.Go(m.startPluginWatcher(c))
 
-	} else {
-		m.c = c
-	}
+	m.t.Go(m.startPluginSupervisor(dying, dead))
 
 	return m
+}
+
+func (m *Manager[C]) Dead() <-chan PluginInfo {
+	return m.dead
 }
 
 func pluginKey(ps goplugin.PluginSet) (key string) {
@@ -82,13 +85,6 @@ func pluginKey(ps goplugin.PluginSet) (key string) {
 		break
 	}
 	return
-}
-
-func (m *Manager[C]) Ch() <-chan PluginInfo {
-	if m.config.RestartConfig.Managed {
-		panic("plugin manager is managed")
-	}
-	return m.c
 }
 
 func (m *Manager[C]) loadPlugin(pm PluginInfo) (PluginInstance[C], error) {
@@ -139,7 +135,7 @@ func (m *Manager[C]) pluginWatcher(
 					m.config.Logger.Debug("plugin %s exited will restart\n", pm.PluginKey)
 					// Non-blocking send or discard
 					select {
-					case m.c <- pm:
+					case m.dying <- pm:
 						// message sent
 					default:
 						// message dropped
@@ -201,12 +197,16 @@ func (m *Manager[C]) RestartPlugin(pm PluginInfo) {
 	m.config.Logger.Debug("restarted plugin: %v", pm)
 }
 
-func (m *Manager[C]) startPluginWatcher(c <-chan PluginInfo) func() error {
+func (m *Manager[C]) startPluginSupervisor(dying <-chan PluginInfo, dead chan<- PluginInfo) func() error {
 	return func() error {
 		for {
 			select {
-			case pm := <-c:
-				m.RestartPlugin(pm)
+			case pm := <-dying:
+				if m.config.RestartConfig.Managed {
+					m.RestartPlugin(pm)
+				} else {
+					dead <- pm
+				}
 
 			case <-m.t.Dying():
 				return nil
