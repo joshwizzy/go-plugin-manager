@@ -177,6 +177,26 @@ func (m *Manager[C]) LoadPlugins(plugins []PluginInfo) error {
 	return nil
 }
 
+type PluginMetadata struct {
+	Key      string `json:"key"`
+	Restarts int    `json:"restarts"`
+}
+
+func (m *Manager[C]) ListPlugins() ([]PluginMetadata, error) {
+	m.Lock()
+	defer m.Unlock()
+
+	metas := []PluginMetadata{}
+	for key, p := range m.plugins {
+		meta := PluginMetadata{
+			Key:      key,
+			Restarts: p.RestartCount,
+		}
+		metas = append(metas, meta)
+	}
+	return metas, nil
+}
+
 func (m *Manager[c]) StopPlugin(pm PluginInfo) error {
 	m.config.Logger.Debug("unloading plugin %s\n", pm.PluginKey)
 
