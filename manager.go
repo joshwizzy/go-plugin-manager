@@ -36,13 +36,13 @@ type RestartConfig struct {
 	Managed      bool
 	PingInterval time.Duration
 	MaxRestarts  int
+	RestartFunc  func(l hclog.Logger, pi PluginInfo) error
 }
 
 type Manager[C any] struct {
 	sync.RWMutex
 	Name    string
-	dying   chan<- PluginInfo
-	dead    <-chan PluginInfo
+	killed  chan PluginInfo
 	config  *ManagerConfig
 	plugins map[string]*PluginInstance[C]
 	t       tomb.Tomb
@@ -63,22 +63,21 @@ func NewManager[C any](config *ManagerConfig) *Manager[C] {
 		})
 	}
 
-	dying, dead := make(chan PluginInfo), make(chan PluginInfo)
+	killed := make(chan PluginInfo)
 	m := &Manager[C]{
 		Name:    pluginKey(config.PluginMap),
 		config:  config,
 		plugins: make(map[string]*PluginInstance[C]),
-		dying:   dying,
-		dead:    dead,
+		killed:  killed,
 	}
 
-	m.t.Go(m.startPluginSupervisor(dying, dead))
+	m.t.Go(m.startSupervisor(killed))
 
 	return m
 }
 
-func (m *Manager[C]) Dead() <-chan PluginInfo {
-	return m.dead
+func (m *Manager[C]) Killed() <-chan PluginInfo {
+	return m.killed
 }
 
 func pluginKey(ps goplugin.PluginSet) (key string) {
@@ -147,7 +146,7 @@ func (m *Manager[C]) pluginWatcher(
 
 					// Non-blocking send or discard
 					select {
-					case m.dying <- pm:
+					case m.killed <- pm:
 						// message sent
 					default:
 						// message dropped
@@ -263,20 +262,17 @@ func (m *Manager[C]) RestartPlugin(pm PluginInfo) {
 	m.config.Logger.Debug("restarted plugin: %v", pm)
 }
 
-func (m *Manager[C]) startPluginSupervisor(dying <-chan PluginInfo, dead chan<- PluginInfo) func() error {
+func (m *Manager[C]) startSupervisor(killed <-chan PluginInfo) func() error {
 	return func() error {
 		for {
 			select {
-			case pm := <-dying:
+			case pm := <-killed:
 				if m.config.RestartConfig.Managed {
 					m.RestartPlugin(pm)
 				} else {
-					// dead <- pm
-					select {
-					case dead <- pm:
-						// message sent
-					default:
-						// message dropped
+					restartFunc := m.config.RestartConfig.RestartFunc
+					if restartFunc != nil {
+						restartFunc(m.config.Logger, pm)
 					}
 				}
 
