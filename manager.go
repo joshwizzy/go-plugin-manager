@@ -314,14 +314,6 @@ func (m *Manager[C]) insertPlugin(pluginKey string, p *PluginInstance[C]) error 
 func (m *Manager[C]) deletePlugin(pluginKey string) error {
 	m.Lock()
 	defer m.Unlock()
-	p, ok := m.plugins[pluginKey]
-	if !ok {
-		err := fmt.Errorf("plugin %v not found", pluginKey)
-		m.config.Logger.Error(err.Error())
-		return err
-	}
-	if p.Kill != nil {
-		p.Kill()
-	}
+	delete(m.plugins, pluginKey)
 	return nil
 }
