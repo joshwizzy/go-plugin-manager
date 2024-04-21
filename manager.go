@@ -10,19 +10,29 @@ import (
 
 	"github.com/hashicorp/go-hclog"
 	goplugin "github.com/hashicorp/go-plugin"
-	"gopkg.in/tomb.v2"
 )
 
 type PluginInstance[T any] struct {
 	Impl         T
-	Kill         func()
+	client       *goplugin.Client
+	rpcClient    goplugin.ClientProtocol
 	RestartCount int
+	Info         PluginInfo
+	stop         chan struct{}
 	done         chan struct{}
 }
 
+func (p *PluginInstance[T]) Kill() {
+	p.client.Kill()
+}
+
+func (p *PluginInstance[T]) Ping() error {
+	return p.rpcClient.Ping()
+}
+
 type PluginInfo struct {
-	BinPath   string
-	PluginKey string
+	BinPath string
+	Key     string
 }
 
 type ManagerConfig struct {
@@ -40,12 +50,14 @@ type RestartConfig struct {
 }
 
 type Manager[C any] struct {
-	sync.RWMutex
+	mu      sync.RWMutex
 	Name    string
 	killed  chan PluginInfo
 	config  *ManagerConfig
 	plugins map[string]*PluginInstance[C]
-	t       tomb.Tomb
+	stop    chan struct{}
+	done    chan struct{}
+	// t       tomb.Tomb
 }
 
 func NewManager[C any](config *ManagerConfig) *Manager[C] {
@@ -69,10 +81,12 @@ func NewManager[C any](config *ManagerConfig) *Manager[C] {
 		config:  config,
 		plugins: make(map[string]*PluginInstance[C]),
 		killed:  killed,
+		done:    make(chan struct{}),
+		stop:    make(chan struct{}),
 	}
 
-	m.t.Go(m.startSupervisor(killed))
-
+	// m.t.Go(m.supervisorFunc(killed))
+	go m.supervisor()
 	return m
 }
 
@@ -112,65 +126,68 @@ func (m *Manager[C]) loadPlugin(pm PluginInfo) (*PluginInstance[C], error) {
 		return nil, fmt.Errorf("plugin does not implement interface")
 	}
 
-	done := make(chan struct{})
-	watcher := m.pluginWatcher(m.config.RestartConfig.PingInterval, rpcClient, pm, done)
-	m.t.Go(watcher)
+	stop, done := make(chan struct{}), make(chan struct{})
 	p := &PluginInstance[C]{
 		Impl:         impl,
-		Kill:         client.Kill,
+		client:       client,
+		rpcClient:    rpcClient,
 		RestartCount: 0,
+		stop:         stop,
 		done:         done,
+		Info:         pm,
 	}
+	go p.Watch(m.config.Logger, m.config.RestartConfig.PingInterval, m.killed)
+
 	return p, nil
 }
 
-func (m *Manager[C]) pluginWatcher(
+func (p *PluginInstance[C]) Watch(
+	l hclog.Logger,
 	interval time.Duration,
-	rpcClient goplugin.ClientProtocol,
-	pm PluginInfo,
-	done chan struct{},
-) func() error {
-	ticker := time.NewTicker(interval)
-	f := func() error {
-		for {
-			select {
-			case <-done:
-				log.Println("we done")
-				return nil
-			case <-ticker.C:
-				if err := rpcClient.Ping(); err != nil {
-					m.config.Logger.Debug("plugin %s exited will restart\n", pm.PluginKey)
-					// if p, ok := m.GetPlugin(pm.PluginKey); ok && p.Unloaded() {
-					// 	return nil
-					// }
+	killed chan PluginInfo,
+) {
+	defer close(p.done)
 
-					// Non-blocking send or discard
-					select {
-					case m.killed <- pm:
-						// message sent
-					default:
-						// message dropped
-					}
-					return nil
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-p.stop:
+			log.Println("we done")
+			return
+		case <-ticker.C:
+			if err := p.Ping(); err != nil {
+				l.Debug("plugin %s exited will restart\n", p.Info.Key)
+				// if p, ok := m.GetPlugin(pm.Key); ok && p.Unloaded() {
+				// 	return nil
+				// }
+
+				// Non-blocking send or discard
+				select {
+				case killed <- p.Info:
+					// message sent
+				default:
+					// message dropped
 				}
-			case <-m.t.Dying():
-				return nil
+				return
 			}
+		case <-p.stop:
+			return
 		}
 	}
-	return f
 }
 
 func (m *Manager[C]) LoadPlugins(plugins []PluginInfo) error {
-	m.Lock()
-	defer m.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	for _, pm := range plugins {
 		p, err := m.loadPlugin(pm)
 		if err != nil {
 			return err
 		}
-		m.plugins[pm.PluginKey] = p
+		m.plugins[pm.Key] = p
 	}
 
 	return nil
@@ -182,8 +199,8 @@ type PluginMetadata struct {
 }
 
 func (m *Manager[C]) ListPlugins() ([]PluginMetadata, error) {
-	m.Lock()
-	defer m.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	metas := []PluginMetadata{}
 	for key, p := range m.plugins {
@@ -197,17 +214,16 @@ func (m *Manager[C]) ListPlugins() ([]PluginMetadata, error) {
 }
 
 func (m *Manager[c]) StopPlugin(pm PluginInfo) error {
-	m.config.Logger.Debug("unloading plugin %s\n", pm.PluginKey)
+	m.config.Logger.Debug("unloading plugin %s\n", pm.Key)
 
-	p, ok := m.GetPlugin(pm.PluginKey)
+	p, ok := m.GetPlugin(pm.Key)
 	if ok {
-		if p.Kill != nil {
-			p.Kill()
-		}
+		p.Kill()
+
 		close(p.done)
 	}
 
-	err := m.deletePlugin(pm.PluginKey)
+	err := m.deletePlugin(pm.Key)
 	if err != nil {
 		m.config.Logger.Error("failed to delete plugin: %v", err)
 		return err
@@ -218,14 +234,14 @@ func (m *Manager[c]) StopPlugin(pm PluginInfo) error {
 }
 
 func (m *Manager[C]) StartPlugin(pm PluginInfo) (*PluginInstance[C], error) {
-	log.Printf("loading %v %v...", pm.PluginKey, pm.BinPath)
+	log.Printf("loading %v %v...", pm.Key, pm.BinPath)
 	p, err := m.loadPlugin(pm)
 	if err != nil {
 		m.config.Logger.Error("failed to load plugin: %v", err)
 		return nil, err
 	}
 
-	err = m.insertPlugin(pm.PluginKey, p)
+	err = m.insertPlugin(pm.Key, p)
 	if err != nil {
 		m.config.Logger.Error("failed to insert", err)
 		return nil, err
@@ -234,82 +250,85 @@ func (m *Manager[C]) StartPlugin(pm PluginInfo) (*PluginInstance[C], error) {
 
 }
 
-func (m *Manager[C]) RestartPlugin(pm PluginInfo) {
-	m.config.Logger.Debug("restarting plugin %s\n", pm.PluginKey)
+func (m *Manager[C]) RestartPlugin(pm PluginInfo) error {
+	m.config.Logger.Debug("restarting plugin %s\n", pm.Key)
 	restartCount := 0
-	p, ok := m.GetPlugin(pm.PluginKey)
+	p, ok := m.GetPlugin(pm.Key)
 	if ok {
 		restartCount = p.RestartCount
 		if restartCount >= m.config.RestartConfig.MaxRestarts {
-			m.config.Logger.Debug("max restarts exceeded: %v\n", m.config.RestartConfig.MaxRestarts)
-			return
+			err := fmt.Errorf("max restarts exceeded: %v", m.config.RestartConfig.MaxRestarts)
+			m.config.Logger.Debug(err.Error())
+			return err
 		}
 	}
 
 	err := m.StopPlugin(pm)
 	if err != nil {
 		m.config.Logger.Error("failed to stop plugin: %v", err)
-		return
+		return err
 	}
 
 	p, err = m.StartPlugin(pm)
 	if err != nil {
 		m.config.Logger.Error("failed to delete plugin: %v", err)
-		return
+		return err
 	}
 	p.RestartCount = restartCount + 1
 
 	m.config.Logger.Debug("restarted plugin: %v", pm)
+	return nil
 }
 
-func (m *Manager[C]) startSupervisor(killed <-chan PluginInfo) func() error {
-	return func() error {
-		for {
-			select {
-			case pm := <-killed:
-				if m.config.RestartConfig.Managed {
-					m.RestartPlugin(pm)
-				} else {
-					restartFunc := m.config.RestartConfig.RestartFunc
-					if restartFunc != nil {
-						restartFunc(m.config.Logger, pm)
-					}
-				}
+func (m *Manager[C]) supervisor() {
+	defer close(m.done)
 
-			case s := <-m.t.Dying():
-				log.Printf("tomb is dying?? %v\n", s)
-				return nil
+	for {
+		select {
+		case pm := <-m.killed:
+			if m.config.RestartConfig.Managed {
+				m.RestartPlugin(pm)
+			} else {
+				restartFunc := m.config.RestartConfig.RestartFunc
+				if restartFunc != nil {
+					restartFunc(m.config.Logger, pm)
+				}
 			}
+
+		case s := <-m.stop:
+			log.Printf("tomb is dying?? %v\n", s)
+			return
 		}
 	}
+
 }
 
 func (m *Manager[C]) Close() error {
-
-	for _, client := range m.plugins {
-		client.Kill()
+	for _, p := range m.plugins {
+		p.Kill()
 	}
-	m.t.Kill(nil)
-	return m.t.Wait()
+	close(m.stop)
+	<-m.done
+	return nil
 }
 
 func (m *Manager[C]) GetPlugin(pluginKey string) (*PluginInstance[C], bool) {
-	m.Lock()
-	defer m.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	p, ok := m.plugins[pluginKey]
 	return p, ok
 }
 
 func (m *Manager[C]) insertPlugin(pluginKey string, p *PluginInstance[C]) error {
-	m.Lock()
-	defer m.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.plugins[pluginKey] = p
 	return nil
 }
 
 func (m *Manager[C]) deletePlugin(pluginKey string) error {
-	m.Lock()
-	defer m.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	delete(m.plugins, pluginKey)
 	return nil
 }
