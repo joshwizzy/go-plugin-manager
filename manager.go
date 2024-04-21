@@ -172,8 +172,6 @@ func (p *PluginInstance[C]) Watch(
 				}
 				return
 			}
-		case <-p.stop:
-			return
 		}
 	}
 }
@@ -220,7 +218,7 @@ func (m *Manager[c]) StopPlugin(pm PluginInfo) error {
 	if ok {
 		p.Kill()
 
-		close(p.done)
+		close(p.stop)
 	}
 
 	err := m.deletePlugin(pm.Key)
