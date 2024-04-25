@@ -24,13 +24,13 @@ type RestartConfig struct {
 	Managed      bool
 	PingInterval time.Duration
 	MaxRestarts  int
-	RestartFunc  func(l hclog.Logger, pi PluginInfo, restartCount int) error
+	// RestartFunc  func(l hclog.Logger, pi PluginInfo, restartCount int) error
 }
 
 type Manager[C any] struct {
 	mu      sync.RWMutex
 	Name    string
-	killed  chan PluginInfo
+	killed  chan KilledPluginInfo
 	config  *ManagerConfig
 	plugins map[string]*pluginInstance[C]
 	stop    chan struct{}
@@ -52,7 +52,7 @@ func NewManager[C any](name string, config *ManagerConfig) *Manager[C] {
 		})
 	}
 
-	killed := make(chan PluginInfo)
+	killed := make(chan KilledPluginInfo)
 	m := &Manager[C]{
 		Name:    name,
 		config:  config,
@@ -61,9 +61,14 @@ func NewManager[C any](name string, config *ManagerConfig) *Manager[C] {
 		done:    make(chan struct{}),
 		stop:    make(chan struct{}),
 	}
-
-	go m.supervisor()
+	if m.config.RestartConfig.Managed {
+		go m.supervisor()
+	}
 	return m
+}
+
+func (m *Manager[C]) PluginKilled() <-chan KilledPluginInfo {
+	return m.killed
 }
 
 func (m *Manager[C]) supervisor() {
@@ -74,13 +79,13 @@ func (m *Manager[C]) supervisor() {
 		case pm := <-m.killed:
 			restartCount := m.getPluginRestarts(pm.Key)
 
-			if !m.config.RestartConfig.Managed {
-				restartFunc := m.config.RestartConfig.RestartFunc
-				if restartFunc != nil {
-					restartFunc(m.config.Logger, pm, restartCount)
-				}
-				continue
-			}
+			// if !m.config.RestartConfig.Managed {
+			// 	restartFunc := m.config.RestartConfig.RestartFunc
+			// 	if restartFunc != nil {
+			// 		// restartFunc(m.config.Logger, pm, restartCount)
+			// 	}
+			// 	continue
+			// }
 
 			if restartCount >= m.config.RestartConfig.MaxRestarts {
 				m.config.Logger.Error(
@@ -91,7 +96,7 @@ func (m *Manager[C]) supervisor() {
 				)
 				continue
 			}
-			m.RestartPlugin(pm)
+			m.RestartPlugin(PluginInfo{Key: pm.Key, BinPath: pm.BinPath, Checksum: pm.Checksum})
 		case <-m.stop:
 			return
 		}
@@ -247,10 +252,10 @@ func (m *Manager[C]) ListPlugins() ([]PluginMetadata, error) {
 	defer m.mu.Unlock()
 
 	metas := []PluginMetadata{}
-	for key, p := range m.plugins {
+	for _, p := range m.plugins {
 		meta := PluginMetadata{
-			Key:      key,
-			Restarts: p.restartCount,
+			PluginInfo: p.Info,
+			Restarts:   p.restartCount,
 		}
 		metas = append(metas, meta)
 	}
@@ -271,8 +276,8 @@ func (m *Manager[C]) GetPluginMetadata(pluginKey string) (PluginMetadata, error)
 		return PluginMetadata{}, fmt.Errorf("plugin %v not found", pluginKey)
 	}
 	return PluginMetadata{
-		Key:      p.Info.Key,
-		Restarts: p.restartCount,
+		PluginInfo: p.Info,
+		Restarts:   p.restartCount,
 	}, nil
 }
 

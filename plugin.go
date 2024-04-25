@@ -14,9 +14,14 @@ type PluginInfo struct {
 	Checksum string
 }
 
+type KilledPluginInfo struct {
+	PluginInfo
+	Restarts int `json:"restarts"`
+}
+
 type PluginMetadata struct {
-	Key      string `json:"key"`
-	Restarts int    `json:"restarts"`
+	PluginInfo
+	Restarts int
 }
 
 type pluginInstance[T any] struct {
@@ -37,10 +42,10 @@ func (p *pluginInstance[T]) Ping() error {
 	return p.rpcClient.Ping()
 }
 
-func (p *pluginInstance[C]) Watch(
+func (p *pluginInstance[T]) Watch(
 	l hclog.Logger,
 	interval time.Duration,
-	killed chan PluginInfo,
+	killed chan KilledPluginInfo,
 ) {
 	defer close(p.done)
 
@@ -61,7 +66,10 @@ func (p *pluginInstance[C]) Watch(
 
 				// Non-blocking send or discard
 				select {
-				case killed <- p.Info:
+				case killed <- KilledPluginInfo{
+					PluginInfo: p.Info,
+					Restarts:   p.restartCount,
+				}:
 					// message sent
 				default:
 					// message dropped
