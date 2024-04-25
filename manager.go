@@ -52,7 +52,7 @@ func NewManager[C any](name string, config *ManagerConfig) *Manager[C] {
 		})
 	}
 
-	killed := make(chan KilledPluginInfo)
+	killed := make(chan KilledPluginInfo, 1)
 	m := &Manager[C]{
 		Name:    name,
 		config:  config,
