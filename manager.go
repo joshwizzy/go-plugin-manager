@@ -15,7 +15,7 @@ import (
 
 type ManagerConfig struct {
 	HandshakeConfig goplugin.HandshakeConfig
-	PluginMap       goplugin.PluginSet
+	Plugin          goplugin.Plugin
 	RestartConfig   RestartConfig
 	Logger          hclog.Logger
 }
@@ -37,15 +37,7 @@ type Manager[C any] struct {
 	done    chan struct{}
 }
 
-func pluginKey(ps goplugin.PluginSet) (key string) {
-	for k := range ps {
-		key = k
-		break
-	}
-	return
-}
-
-func NewManager[C any](config *ManagerConfig) *Manager[C] {
+func NewManager[C any](name string, config *ManagerConfig) *Manager[C] {
 	if config.RestartConfig.MaxRestarts == 0 {
 		config.RestartConfig.MaxRestarts = 5
 	}
@@ -62,7 +54,7 @@ func NewManager[C any](config *ManagerConfig) *Manager[C] {
 
 	killed := make(chan PluginInfo)
 	m := &Manager[C]{
-		Name:    pluginKey(config.PluginMap),
+		Name:    name,
 		config:  config,
 		plugins: make(map[string]*pluginInstance[C]),
 		killed:  killed,
@@ -127,8 +119,10 @@ func (m *Manager[C]) getPluginRestarts(pluginKey string) int {
 func (m *Manager[C]) loadPlugin(pm PluginInfo) (*pluginInstance[C], error) {
 	config := &goplugin.ClientConfig{
 		HandshakeConfig: m.config.HandshakeConfig,
-		Plugins:         m.config.PluginMap,
-		Cmd:             exec.Command(pm.BinPath),
+		Plugins: map[string]goplugin.Plugin{
+			m.Name: m.config.Plugin,
+		},
+		Cmd: exec.Command(pm.BinPath),
 	}
 	if pm.Checksum != "" {
 		src := []byte(pm.Checksum)
