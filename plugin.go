@@ -66,3 +66,9 @@ func (p *pluginInstance[T]) Watch(
 		}
 	}
 }
+
+func (p *pluginInstance[T]) Stop() {
+	close(p.stop)
+	<-p.done
+	p.client.Kill()
+}

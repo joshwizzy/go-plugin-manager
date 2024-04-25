@@ -96,7 +96,7 @@ func (m *Manager[C]) supervisor() {
 func (m *Manager[C]) Shutdown() error {
 	close(m.killed)
 	for _, p := range m.plugins {
-		p.Kill()
+		p.Stop()
 	}
 	if m.config.RestartConfig.Managed {
 		close(m.stop)
@@ -181,9 +181,7 @@ func (m *Manager[c]) StopPlugin(pm PluginInfo) error {
 		return fmt.Errorf("plugin %v not found", pm.Key)
 	}
 
-	p.Kill()
-	close(p.stop)
-	<-p.done
+	p.Stop()
 
 	err := m.deletePlugin(pm.Key)
 	if err != nil {
@@ -245,7 +243,7 @@ func (m *Manager[C]) ListPlugins() ([]PluginInfo, error) {
 func (m *Manager[C]) GetPlugin(pluginKey string) (C, error) {
 	p, ok := m.getPlugin(pluginKey)
 	if !ok {
-		return *(*C)(nil), fmt.Errorf("plugin %v not found", pluginKey)
+		return *new(C), fmt.Errorf("plugin %v not found", pluginKey)
 	}
 	return p.Impl, nil
 }
