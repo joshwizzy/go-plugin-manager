@@ -110,6 +110,7 @@ func (m *Manager[C]) Shutdown() error {
 	}
 	close(m.stop)
 	<-m.done
+	close(m.killed)
 	return nil
 }
 
