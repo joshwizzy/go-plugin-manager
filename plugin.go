@@ -12,26 +12,16 @@ type PluginInfo struct {
 	BinPath  string
 	Key      string
 	Checksum string
-}
-
-type KilledPluginInfo struct {
-	PluginInfo
-	Restarts int `json:"restarts"`
-}
-
-type PluginMetadata struct {
-	PluginInfo
 	Restarts int
 }
 
 type pluginInstance[T any] struct {
-	Impl         T
-	client       *goplugin.Client
-	rpcClient    goplugin.ClientProtocol
-	restartCount int
-	Info         PluginInfo
-	stop         chan struct{}
-	done         chan struct{}
+	Impl      T
+	client    *goplugin.Client
+	rpcClient goplugin.ClientProtocol
+	Info      PluginInfo
+	stop      chan struct{}
+	done      chan struct{}
 }
 
 func (p *pluginInstance[T]) Kill() {
@@ -45,7 +35,7 @@ func (p *pluginInstance[T]) Ping() error {
 func (p *pluginInstance[T]) Watch(
 	l hclog.Logger,
 	interval time.Duration,
-	killed chan KilledPluginInfo,
+	killed chan PluginInfo,
 ) {
 	defer close(p.done)
 
@@ -66,10 +56,7 @@ func (p *pluginInstance[T]) Watch(
 
 				// Non-blocking send or discard
 				select {
-				case killed <- KilledPluginInfo{
-					PluginInfo: p.Info,
-					Restarts:   p.restartCount,
-				}:
+				case killed <- p.Info:
 					// message sent
 				default:
 					// message dropped
