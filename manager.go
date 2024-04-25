@@ -1,6 +1,8 @@
 package manager
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -123,11 +125,25 @@ func (m *Manager[C]) getPluginRestarts(pluginKey string) int {
 }
 
 func (m *Manager[C]) loadPlugin(pm PluginInfo) (*pluginInstance[C], error) {
-	client := goplugin.NewClient(&goplugin.ClientConfig{
+	config := &goplugin.ClientConfig{
 		HandshakeConfig: m.config.HandshakeConfig,
 		Plugins:         m.config.PluginMap,
 		Cmd:             exec.Command(pm.BinPath),
-	})
+	}
+	if pm.Checksum != "" {
+		src := []byte(pm.Checksum)
+		dst := make([]byte, hex.DecodedLen(len(src)))
+		_, err := hex.Decode(dst, src)
+		if err != nil {
+			m.config.Logger.Error(err.Error())
+			return nil, err
+		}
+		config.SecureConfig = &goplugin.SecureConfig{
+			Checksum: dst,
+			Hash:     sha256.New(),
+		}
+	}
+	client := goplugin.NewClient(config)
 
 	rpcClient, err := client.Client()
 	if err != nil {

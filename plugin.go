@@ -9,8 +9,9 @@ import (
 )
 
 type PluginInfo struct {
-	BinPath string
-	Key     string
+	BinPath  string
+	Key      string
+	Checksum string
 }
 
 type PluginMetadata struct {
