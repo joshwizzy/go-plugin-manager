@@ -105,12 +105,15 @@ func (m *Manager[C]) supervisor() {
 }
 
 func (m *Manager[C]) Shutdown() error {
+	close(m.killed)
 	for _, p := range m.plugins {
 		p.Kill()
 	}
-	close(m.stop)
-	<-m.done
-	close(m.killed)
+	if m.config.RestartConfig.Managed {
+		close(m.stop)
+		<-m.done
+	}
+
 	return nil
 }
 
